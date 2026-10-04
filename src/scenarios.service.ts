@@ -76,7 +76,9 @@ export class ScenariosService {
 
   async getCart(userId: number) {
     const entries = await this.kv.client.hgetall(this.kv.key('cart', userId));
-    return Object.values(entries).map((value) => JSON.parse(value));
+    return Object.values(entries as Record<string, string>).map((value) =>
+      JSON.parse(value),
+    );
   }
 
   async addActivity(userId: number, type: string, entityId: number) {
