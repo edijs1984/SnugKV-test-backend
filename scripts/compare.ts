@@ -16,6 +16,26 @@ type Metrics = {
   usedMemoryRss: number | null;
 };
 
+type ScenarioName =
+  | 'catalog'
+  | 'session-write'
+  | 'session-read'
+  | 'cart'
+  | 'activity'
+  | 'rate-limit'
+  | 'tags'
+  | 'leaderboard'
+  | 'counter';
+
+type ScenarioStats = {
+  requests: number;
+  errors: number;
+  requestsPerSecond: number;
+  p50Ms: number;
+  p95Ms: number;
+  p99Ms: number;
+};
+
 type RunResult = {
   target: TargetName;
   requests: number;
@@ -28,6 +48,7 @@ type RunResult = {
   maxMs: number;
   memoryBefore: Metrics;
   memoryAfter: Metrics;
+  scenarios: Record<string, ScenarioStats>;
 };
 
 function arg(name: string, fallback: string) {
@@ -61,46 +82,51 @@ function requestFor(index: number) {
   const productId = (hash32(n + 29) % 100000) + 1;
 
   if (bucket < 35) {
-    return { method: 'GET', path: `/api/scenarios/catalog/${productId}` };
+    return { scenario: 'catalog' as ScenarioName, method: 'GET', path: `/api/scenarios/catalog/${productId}` };
   }
   if (bucket < 48) {
     return {
+      scenario: 'session-write' as ScenarioName,
       method: 'POST',
       path: `/api/scenarios/session/${userId}`,
       body: JSON.stringify({ device: `device-${n % 5000}`, request: index }),
     };
   }
   if (bucket < 56) {
-    return { method: 'GET', path: `/api/scenarios/session/${userId}` };
+    return { scenario: 'session-read' as ScenarioName, method: 'GET', path: `/api/scenarios/session/${userId}` };
   }
   if (bucket < 68) {
     return {
+      scenario: 'cart' as ScenarioName,
       method: 'POST',
       path: `/api/scenarios/cart/${userId}/${productId}/${(n % 5) + 1}`,
     };
   }
   if (bucket < 76) {
     return {
+      scenario: 'activity' as ScenarioName,
       method: 'POST',
       path: `/api/scenarios/activity/${userId}/view/${productId}`,
     };
   }
   if (bucket < 83) {
-    return { method: 'POST', path: `/api/scenarios/rate-limit/${userId}` };
+    return { scenario: 'rate-limit' as ScenarioName, method: 'POST', path: `/api/scenarios/rate-limit/${userId}` };
   }
   if (bucket < 89) {
     return {
+      scenario: 'tags' as ScenarioName,
       method: 'POST',
       path: `/api/scenarios/tags/${userId}/tag-${n % 250}`,
     };
   }
   if (bucket < 95) {
     return {
+      scenario: 'leaderboard' as ScenarioName,
       method: 'POST',
       path: `/api/scenarios/leaderboard/${userId}/${(n % 10) + 1}`,
     };
   }
-  return { method: 'POST', path: `/api/scenarios/counter/api-requests/1` };
+  return { scenario: 'counter' as ScenarioName, method: 'POST', path: `/api/scenarios/counter/api-requests/1` };
 }
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
@@ -111,7 +137,7 @@ async function json<T>(url: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function execute(baseUrl: string, index: number) {
+async function execute(baseUrl: string, index: number): Promise<{ latency: number; scenario: ScenarioName }> {
   const request = requestFor(index);
   const start = performance.now();
   const response = await fetch(baseUrl + request.path, {
@@ -121,7 +147,7 @@ async function execute(baseUrl: string, index: number) {
   });
   await response.arrayBuffer();
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return performance.now() - start;
+  return { latency: performance.now() - start, scenario: request.scenario };
 }
 
 function percentile(sorted: number[], p: number) {
@@ -152,6 +178,7 @@ async function run(target: TargetName, baseUrl: string): Promise<RunResult> {
   const memoryBefore = await json<Metrics>(baseUrl + '/api/metrics');
 
   const latencies: number[] = [];
+  const byScenario = new Map<ScenarioName, { latencies: number[]; errors: number }>();
   let errors = 0;
   let next = 0;
   const started = performance.now();
@@ -161,7 +188,11 @@ async function run(target: TargetName, baseUrl: string): Promise<RunResult> {
       const index = next++;
       if (index >= config.requests) return;
       try {
-        latencies.push(await execute(baseUrl, index));
+        const result = await execute(baseUrl, index);
+        latencies.push(result.latency);
+        const current = byScenario.get(result.scenario) ?? { latencies: [], errors: 0 };
+        current.latencies.push(result.latency);
+        byScenario.set(result.scenario, current);
       } catch {
         errors++;
       }
@@ -172,6 +203,19 @@ async function run(target: TargetName, baseUrl: string): Promise<RunResult> {
   const durationMs = performance.now() - started;
   const memoryAfter = await json<Metrics>(baseUrl + '/api/metrics');
   latencies.sort((a, b) => a - b);
+
+  const scenarios: Record<string, ScenarioStats> = {};
+  for (const [name, stats] of byScenario) {
+    stats.latencies.sort((a, b) => a - b);
+    scenarios[name] = {
+      requests: stats.latencies.length,
+      errors: stats.errors,
+      requestsPerSecond: (stats.latencies.length / durationMs) * 1000,
+      p50Ms: percentile(stats.latencies, 0.5),
+      p95Ms: percentile(stats.latencies, 0.95),
+      p99Ms: percentile(stats.latencies, 0.99),
+    };
+  }
 
   return {
     target,
@@ -185,6 +229,7 @@ async function run(target: TargetName, baseUrl: string): Promise<RunResult> {
     maxMs: latencies.at(-1) ?? 0,
     memoryBefore,
     memoryAfter,
+    scenarios,
   };
 }
 
@@ -237,6 +282,24 @@ async function main() {
     `SnugKV vs Redis: throughput ${pct(snug.requestsPerSecond, redis.requestsPerSecond).toFixed(1)}%, ` +
       `p95 ${pct(snug.p95Ms, redis.p95Ms).toFixed(1)}%, ` +
       `memory ${redisMem > 0 ? pct(snugMem, redisMem).toFixed(1) + '%' : 'n/a'}`,
+  );
+
+  console.log('\nPer-scenario latency:');
+  const scenarioNames = Array.from(
+    new Set([...Object.keys(redis.scenarios), ...Object.keys(snug.scenarios)]),
+  );
+  console.table(
+    scenarioNames.map((name) => ({
+      scenario: name,
+      redis_count: redis.scenarios[name]?.requests ?? 0,
+      redis_p95_ms: redis.scenarios[name]?.p95Ms.toFixed(2) ?? '-',
+      snug_count: snug.scenarios[name]?.requests ?? 0,
+      snug_p95_ms: snug.scenarios[name]?.p95Ms.toFixed(2) ?? '-',
+      p95_delta_pct:
+        redis.scenarios[name] && snug.scenarios[name]
+          ? pct(snug.scenarios[name].p95Ms, redis.scenarios[name].p95Ms).toFixed(1)
+          : '-',
+    })),
   );
 
   console.log(JSON.stringify({ config, redis, snug }, null, 2));
