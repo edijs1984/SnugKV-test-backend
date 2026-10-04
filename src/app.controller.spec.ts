@@ -1,22 +1,17 @@
-import { Test, TestingModule } from '@nestjs/testing';
 import { AppController } from './app.controller';
-import { AppService } from './app.service';
 
 describe('AppController', () => {
-  let appController: AppController;
-
-  beforeEach(async () => {
-    const app: TestingModule = await Test.createTestingModule({
-      controllers: [AppController],
-      providers: [AppService],
-    }).compile();
-
-    appController = app.get<AppController>(AppController);
-  });
-
-  describe('root', () => {
-    it('should return "Hello World!"', () => {
-      expect(appController.getHello()).toBe('Hello World!');
-    });
+  it('reports the configured target', async () => {
+    const redis = {
+      target: 'snug',
+      host: '127.0.0.1',
+      port: 6383,
+      client: { ping: jest.fn().mockResolvedValue('PONG') },
+    };
+    const controller = new AppController(redis as never);
+    const result = await controller.health();
+    expect(result.ok).toBe(true);
+    expect(result.target).toBe('snug');
+    expect(result.port).toBe(6383);
   });
 });
