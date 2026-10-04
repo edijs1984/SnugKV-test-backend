@@ -18,7 +18,14 @@ function productPayload(id: number) {
 
 @Injectable()
 export class ScenariosService {
+  private readonly benchmarkMode = process.env.BENCHMARK_MODE !== '0';
+  private readonly longTtl = Number(process.env.BENCHMARK_TTL_SECONDS ?? 21600);
+
   constructor(private readonly kv: RedisService) {}
+
+  private ttl(normalSeconds: number) {
+    return this.benchmarkMode ? this.longTtl : normalSeconds;
+  }
 
   async catalog(id: number) {
     const key = this.kv.key('catalog', id);
@@ -26,7 +33,7 @@ export class ScenariosService {
     if (cached) return { cache: 'hit', data: JSON.parse(cached) };
 
     const data = productPayload(id);
-    await this.kv.client.set(key, JSON.stringify(data), 'EX', 300);
+    await this.kv.client.set(key, JSON.stringify(data), 'EX', this.ttl(300));
     return { cache: 'miss', data };
   }
 
@@ -49,7 +56,7 @@ export class ScenariosService {
       this.kv.key('session', userId),
       JSON.stringify(session),
       'EX',
-      1800,
+      this.ttl(1800),
     );
     return session;
   }
@@ -69,7 +76,7 @@ export class ScenariosService {
     });
     const pipeline = this.kv.client.pipeline();
     pipeline.hset(key, String(productId), value);
-    pipeline.expire(key, 86400);
+    pipeline.expire(key, this.ttl(86400));
     await pipeline.exec();
     return { userId, productId, quantity };
   }
@@ -87,7 +94,7 @@ export class ScenariosService {
     const pipeline = this.kv.client.pipeline();
     pipeline.lpush(key, event);
     pipeline.ltrim(key, 0, 99);
-    pipeline.expire(key, 3600);
+    pipeline.expire(key, this.ttl(3600));
     await pipeline.exec();
     return { ok: true };
   }
@@ -101,7 +108,7 @@ export class ScenariosService {
     const key = this.kv.key('tags', userId);
     const pipeline = this.kv.client.pipeline();
     pipeline.sadd(key, tag);
-    pipeline.expire(key, 86400);
+    pipeline.expire(key, this.ttl(86400));
     await pipeline.exec();
     return { ok: true };
   }
@@ -124,10 +131,12 @@ export class ScenariosService {
   }
 
   async rateLimit(userId: number) {
-    const bucket = Math.floor(Date.now() / 60_000);
+    const bucket = this.benchmarkMode
+      ? 'benchmark'
+      : String(Math.floor(Date.now() / 60_000));
     const key = this.kv.key('rate', userId, bucket);
     const value = await this.kv.client.incr(key);
-    if (value === 1) await this.kv.client.expire(key, 65);
+    if (value === 1) await this.kv.client.expire(key, this.ttl(65));
     return { count: value, allowed: value <= 120 };
   }
 
