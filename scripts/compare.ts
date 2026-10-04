@@ -7,6 +7,7 @@ type Config = {
   redisUrl: string;
   snugUrl: string;
   warmup: number;
+  only: 'redis' | 'snug' | 'both';
 };
 
 type Metrics = {
@@ -63,6 +64,7 @@ const config: Config = {
   redisUrl: arg('redis-url', 'http://127.0.0.1:3001'),
   snugUrl: arg('snug-url', 'http://127.0.0.1:3002'),
   warmup: Number(arg('warmup', '2000')),
+  only: arg('only', 'both') as 'redis' | 'snug' | 'both',
 };
 
 function hash32(n: number) {
@@ -242,6 +244,17 @@ async function main() {
   console.log('35% cache JSON, 13% session write, 8% session read, 12% hash cart,');
   console.log('8% activity list, 7% rate limit, 6% set tags, 6% zset leaderboard, 5% counter');
   console.log(`requests=${config.requests} concurrency=${config.concurrency} seed=${config.seed}`);
+
+  if (config.only === 'redis') {
+    const redis = await run('redis', config.redisUrl);
+    console.log(JSON.stringify({ config, redis }, null, 2));
+    return;
+  }
+  if (config.only === 'snug') {
+    const snug = await run('snug', config.snugUrl);
+    console.log(JSON.stringify({ config, snug }, null, 2));
+    return;
+  }
 
   const redis = await run('redis', config.redisUrl);
   const snug = await run('snug', config.snugUrl);
